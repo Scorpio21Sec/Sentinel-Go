@@ -1,10 +1,16 @@
-# SentinelGo 🛡️
+# SentinelGo
 
-**OS-Level AI Security System** — eBPF + Go + Python Isolation Forest
+**OS-level behavioural anomaly detector** — eBPF + Go + Python Isolation Forest
 
 > Built as a research project targeting IIT Madras Centre for Cybersecurity Trust and Reliability.
 
 ---
+
+## What it does
+
+SentinelGo hooks into Linux kernel syscalls via eBPF tracepoints to watch every process execution, file open, and network connection on the host.  A Go pipeline aggregates those raw events into 5-second behavioural windows and ships the resulting feature vector to a small Python server running an Isolation Forest model.  When the model sees activity that deviates from the learned baseline it prints a colour-coded alert to the terminal.
+
+The design goal is **zero labelled data required**: the model learns what *normal* looks like on the target machine and flags deviations, rather than matching against a signature database.
 
 ## Architecture
 
@@ -14,21 +20,19 @@
 │                                                         │
 │  execve ──┐                                             │
 │  openat ──┤── eBPF tracepoints ──► Ring Buffer          │
-│  connect ─┤      (C/BPF)                                │
+│  connect ─┤      (C / BPF)                              │
 │  clone  ──┘                                             │
 └─────────────────────┬───────────────────────────────────┘
-                      │ BpfEvent (binary)
+                      │ BpfEvent (binary, little-endian)
                       ▼
 ┌─────────────────────────────────────────────────────────┐
 │                   Go Pipeline                           │
 │                                                         │
-│  Collector ──► channel ──► Extractor ──► channel        │
-│  (ring buf        (buf=512)   (5s window)    (buf=20)   │
-│   reader)                                               │
-│                                          FeatureVector  │
-│                                               │         │
-│                                    HTTP POST ▼         │
-└────────────────────────────────────────────────────────┘
+│  Collector ──► chan(512) ──► Extractor ──► chan(20)      │
+│  (ring-buf                  (5 s window)  FeatureVector │
+│   reader)                                     │         │
+│                                      HTTP POST ▼        │
+└─────────────────────────────────────────────────────────┘
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────┐
@@ -49,68 +53,70 @@
 
 ```
 sentinelgo/
-├── cmd/sentinel/         # Main Go binary entry point
+├── cmd/sentinel/         # main binary
 ├── internal/
-│   ├── collector/        # eBPF loader + ring buffer reader
-│   ├── extractor/        # Feature extraction (5s windows)
-│   └── sender/           # HTTP client + alert display
+│   ├── collector/        # eBPF loader + ring-buffer reader + stub
+│   ├── extractor/        # 5-second window feature aggregation
+│   └── sender/           # HTTP client + alert renderer
 ├── ebpf/
 │   └── sentinel.bpf.c    # eBPF C program (syscall hooks)
 ├── ml/
-│   ├── server.py         # FastAPI + Isolation Forest server
-│   ├── topic6_isolation_forest.py  # standalone ML demo
+│   ├── server.py                    # FastAPI + Isolation Forest
+│   ├── collect_baseline.py          # baseline retraining helper
+│   ├── topic6_isolation_forest.py   # standalone ML demo
 │   └── requirements.txt
 ├── netsentry/
-│   └── netsentry.py      # Network-level anomaly detector (Scapy)
+│   └── netsentry.py      # network-level anomaly detector (Scapy)
 ├── scripts/
-│   └── simulate_attack.sh  # Demo attack simulator
-├── topic1_basics/        # Topic 1 mini-task
-├── topic2_concurrency/   # Topic 2 mini-task
-├── topic5_features/      # Topic 5 mini-task
-├── topic7_http/          # Topic 7 mini-task
+│   └── simulate_attack.sh  # demo attack simulator
+├── tests/
+│   └── integration_test.go # end-to-end pipeline tests (no kernel needed)
+├── topic1_basics/        # Go basics demo
+├── topic2_concurrency/   # goroutine pipeline demo
+├── topic5_features/      # feature extraction demo
+├── topic7_http/          # Go ↔ Python HTTP demo
 └── go.mod
 ```
 
 ## Quick Start
 
-### 1. Python ML Server
+### 1. Start the Python ML server
 
 ```bash
 cd ml
 pip install -r requirements.txt
 python server.py
-# Server running on http://localhost:8000
-# Auto-trains on synthetic normal data at startup
+# Trains on synthetic normal data at startup; ready in ~2 s
 ```
 
-### 2. Go Pipeline (stub mode — no kernel required)
+### 2. Run the Go pipeline (stub mode — no kernel required)
 
 ```bash
 go build ./cmd/sentinel
-sudo ./sentinel --stub --api=http://localhost:8000
+./sentinel --stub --api=http://localhost:8000
 ```
 
-### 3. Real eBPF Mode (Linux kernel 5.8+)
+### 3. Real eBPF mode (Linux kernel 5.8+, requires root)
 
 ```bash
 # Install build deps (Ubuntu 22.04)
-sudo apt install clang llvm libbpf-dev linux-headers-$(uname -r) linux-tools-common
+sudo apt install clang llvm libbpf-dev linux-headers-$(uname -r)
 
-# Generate vmlinux.h for your kernel
+# Generate vmlinux.h for your running kernel
 bpftool btf dump file /sys/kernel/btf/vmlinux format c > ebpf/vmlinux.h
 
-# Compile eBPF object
+# Compile the eBPF object
 clang -O2 -g -Wall -target bpf \
   -D__TARGET_ARCH_x86 \
   -I/usr/include/bpf \
   -c ebpf/sentinel.bpf.c -o ebpf/sentinel.bpf.o
 
-# Run
+# Run (needs CAP_BPF / root)
 go build ./cmd/sentinel
 sudo ./sentinel --ebpf-obj=./ebpf/sentinel.bpf.o
 ```
 
-### 4. Trigger an Alert (Demo)
+### 4. Trigger a demo alert
 
 In a second terminal while SentinelGo is running:
 
@@ -118,65 +124,68 @@ In a second terminal while SentinelGo is running:
 bash scripts/simulate_attack.sh
 ```
 
-You should see a red alert box in the SentinelGo terminal.
-
-## Features Extracted
-
-| Feature | Description | Malware Signal |
-|---|---|---|
-| `exec_count` | New processes per window | Process injection, malware spawning |
-| `fork_rate` | clone/fork calls | Fork bombs, rapid replication |
-| `unique_procs` | Distinct process names | Unusual binaries executing |
-| `unique_files_opened` | Distinct files accessed | Ransomware file enumeration |
-| `sensitive_file_hits` | Accesses to `/etc/`, `/root/`, `.ssh/` | Credential harvesting |
-| `total_open_calls` | Raw openat count | Bulk file scanning |
-| `new_connections` | Outbound connect() calls | C2 callback, exfiltration |
-
-## Running Mini-Tasks
+### 5. Run tests (no kernel, no Python needed)
 
 ```bash
-# Topic 1 — Go basics
-go run topic1_basics/main.go
+go test ./tests/ -v -timeout 30s
+```
 
-# Topic 2 — Goroutines + channels
-go run topic2_concurrency/main.go
+## Features extracted per window
 
-# Topic 5 — Feature extraction
-go run topic5_features/main.go
+| Feature | What it counts | Malware signal |
+|---|---|---|
+| `exec_count` | execve calls | process injection, malware spawning |
+| `fork_rate` | clone/fork calls | fork bombs, rapid replication |
+| `unique_procs` | distinct process names | unusual binaries running |
+| `unique_files_opened` | distinct file paths opened | ransomware file enumeration |
+| `sensitive_file_hits` | opens of `/etc/`, `/root/`, `.ssh/`, `/proc/`, `/sys/` | credential harvesting |
+| `total_open_calls` | raw openat count | bulk file scanning |
+| `new_connections` | connect() calls | C2 callback, data exfiltration |
 
-# Topic 6 — Isolation Forest standalone (Python)
-python ml/topic6_isolation_forest.py
+## Running the mini-task demos
 
-# Topic 7 — Go HTTP → Python test (server must be running)
-go run topic7_http/main.go
+```bash
+go run topic1_basics/main.go       # event struct + JSON
+go run topic2_concurrency/main.go  # goroutine producer/consumer
+go run topic5_features/main.go     # feature extraction
+go run topic7_http/main.go         # Go → Python HTTP call
 
-# Topic 8 — NetSentry (stub mode)
-python netsentry/netsentry.py --stub
+python ml/topic6_isolation_forest.py  # standalone Isolation Forest demo
+python netsentry/netsentry.py --stub  # NetSentry network monitor (stub)
 ```
 
 ## Why eBPF?
 
-- Runs in kernel space — cannot be evaded by userspace rootkits
-- Microsecond precision — catches short-lived malicious processes
-- No kernel module required — safe, verified by kernel verifier
-- Zero overhead for non-matching events
+- Runs in kernel space — cannot be evaded by user-space rootkits
+- Microsecond precision — catches short-lived malicious processes that polling `/proc` would miss
+- No kernel module required — safe, verified by the kernel verifier
+- Negligible overhead for non-matching events
 
 ## Why Isolation Forest?
 
-- **Unsupervised** — no labelled malware samples needed
-- Learns normal behaviour, flags deviations
-- Handles high-dimensional feature vectors efficiently
-- Interpretable: each feature contribution can be examined
+- **Unsupervised** — no labelled malware samples required; learns a normal baseline
+- Handles high-dimensional feature vectors without per-feature thresholds
 - Fast: O(n log n) training, O(log n) inference
+- Decision scores are interpretable: a score of −0.3 means "moderately anomalous"
 
-## Interview Quick Reference
+## Design trade-offs and limitations
 
-**"Explain your project in 30 seconds"**
-> SentinelGo hooks into Linux kernel syscalls via eBPF to capture every process execution, file access, and network connection. A Go pipeline aggregates these into behavioural feature vectors every 5 seconds and ships them to a Python server running Isolation Forest. The model learns what normal looks like and alerts on deviations — in real time, at the kernel level, with no labelled training data required.
+- **Synthetic training data**: the ML server trains on generated normal-behaviour data by default.  On a real deployment you should run `ml/collect_baseline.py` for 10–30 minutes on a quiet system and retrain via `POST /retrain`, otherwise the false-positive rate will be higher.
+- **Fixed window size**: the 5-second window is a reasonable default for interactive workloads but may be too coarse for very short attack bursts (< 1 s).  The `--window` flag lets you tune this.
+- **Feature set**: only four syscall families are hooked (`execve`, `openat`, `connect`, `clone`).  Encrypted exfiltration over an existing connection, for example, will not raise `new_connections > threshold`.
+- **Single host**: there is no aggregation layer; each host runs its own model with its own baseline.
+- **Python dependency**: the anomaly scoring requires the FastAPI server to be reachable.  If the server is down, events are still collected locally but no alerts fire.
+- **Root / CAP_BPF required**: real eBPF mode needs elevated privileges.  The `--stub` flag works without root for development and CI.
 
-**"Why not just poll /proc?"**
-> eBPF catches every event in microseconds. Polling /proc misses short-lived processes, introduces latency, and can be fooled by processes that hide themselves from the /proc filesystem.
+## Next steps
+
+- [ ] Persist collected feature vectors to disk so the model can be retrained across restarts
+- [ ] Add eBPF hook for `write` to catch in-memory exfiltration
+- [ ] Structured JSON log output (instead of plain `log.Printf`) for SIEM integration
+- [ ] Prometheus metrics endpoint for `total_predictions`, `anomaly_rate`, etc.
+- [ ] Multi-host aggregation / central alert collector
 
 ## License
 
 MIT
+

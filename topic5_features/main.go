@@ -1,6 +1,5 @@
 // ============================================================
-// topic5_features/main.go
-// TOPIC 5 MINI-TASK — Feature Extraction in Go
+// topic5_features/main.go — Feature Extraction mini-task
 //
 // Accepts fake events, computes a FeatureVector, and prints JSON.
 // Run: go run topic5_features/main.go
@@ -17,6 +16,7 @@ import (
 type Event struct {
 	ProcessName string
 	Syscall     string
+	Filename    string
 	Timestamp   int64
 }
 
@@ -39,7 +39,6 @@ func isSensitive(filename string) bool {
 	return false
 }
 
-// extract computes a FeatureVector from a slice of events.
 func extract(events []Event) FeatureVector {
 	procs := make(map[string]struct{})
 	fv := FeatureVector{}
@@ -51,9 +50,8 @@ func extract(events []Event) FeatureVector {
 			fv.ExecCount++
 		case "openat":
 			fv.OpenCount++
-			// For demo: if process name looks like a sensitive read, count it
-			if isSensitive("/etc/passwd") {
-				fv.SensitiveHits++ // in real code this comes from e.Filename
+			if isSensitive(e.Filename) {
+				fv.SensitiveHits++
 			}
 		case "connect":
 			fv.ConnectCount++
@@ -67,16 +65,15 @@ func extract(events []Event) FeatureVector {
 func main() {
 	now := time.Now().UnixNano()
 
-	// Fake events — in real SentinelGo these come from eBPF
 	events := []Event{
-		{"bash", "execve", now},
-		{"bash", "execve", now + 100},
-		{"curl", "connect", now + 200},
-		{"python3", "execve", now + 300},
-		{"cat", "openat", now + 400},
-		{"bash", "execve", now + 500},
-		{"nmap", "connect", now + 600},
-		{"wget", "connect", now + 700},
+		{"bash", "execve", "", now},
+		{"bash", "execve", "", now + 100},
+		{"curl", "connect", "", now + 200},
+		{"python3", "execve", "", now + 300},
+		{"cat", "openat", "/etc/passwd", now + 400},
+		{"bash", "execve", "", now + 500},
+		{"nmap", "connect", "", now + 600},
+		{"wget", "connect", "", now + 700},
 	}
 
 	fv := extract(events)

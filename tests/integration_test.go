@@ -1,10 +1,5 @@
-// ============================================================
-// tests/integration_test.go
-// End-to-end pipeline test using the stub collector.
-// Verifies: events flow → features are extracted → sender fires.
-//
+// tests/integration_test.go tests the full stub pipeline end-to-end.
 // Run: go test ./tests/ -v -timeout 30s
-// ============================================================
 package tests
 
 import (
@@ -21,8 +16,8 @@ import (
 	"sentinelgo/internal/sender"
 )
 
-// fakePredictServer starts a local HTTP server that mimics the Python FastAPI
-// /predict endpoint. Returns anomaly=true for vectors with exec_count > 20.
+// fakePredictServer starts a local HTTP server that mimics the Python /predict
+// endpoint.  It flags anomalies when exec_count > 20.
 func fakePredictServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,18 +41,26 @@ func fakePredictServer(t *testing.T) *httptest.Server {
 			score = -0.42
 		}
 
-		resp := map[string]interface{}{
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			"anomaly_score": score,
 			"is_anomaly":    isAnomaly,
 			"confidence":    0.85,
 			"model":         "FakeIsolationForest",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		})
 	}))
 }
 
-// TestPipelineNormalBehavior verifies that normal events don't trigger alerts.
+func mustNewSender(t *testing.T, apiURL string, threshold float64) *sender.Sender {
+	t.Helper()
+	s, err := sender.NewSender(apiURL, threshold)
+	if err != nil {
+		t.Fatalf("NewSender: %v", err)
+	}
+	return s
+}
+
+// TestPipelineNormalBehavior verifies that normal events don't panic the pipeline.
 func TestPipelineNormalBehavior(t *testing.T) {
 	srv := fakePredictServer(t)
 	defer srv.Close()
@@ -66,25 +69,26 @@ func TestPipelineNormalBehavior(t *testing.T) {
 	defer close(stopCh)
 
 	coll := collector.NewCollector(256)
-	go coll.RunStubEvents() // synthetic events — normal rate
+	go coll.RunStubEvents()
 
 	ext := extractor.NewExtractor(coll.EventCh, 500*time.Millisecond)
 	go ext.Run(stopCh)
 
-	snd := sender.NewSender(srv.URL, -0.1)
+	snd := mustNewSender(t, srv.URL, -0.1)
 	go snd.Run(ext.FeatureCh, stopCh)
 
-	// Let two windows pass
 	time.Sleep(1200 * time.Millisecond)
 	coll.Stop()
 
 	t.Log("Pipeline ran without panic ✅")
 }
 
-// TestFeatureExtraction verifies feature counting is correct.
+// TestFeatureExtraction verifies that event counts are accumulated correctly
+// within a window, including that sensitive file hits are counted.
 func TestFeatureExtraction(t *testing.T) {
-	// Build synthetic events
-	events := []collector.BpfEvent{}
+	var events []collector.BpfEvent
+
+	// 10 execve events from bash
 	for i := 0; i < 10; i++ {
 		var comm [16]byte
 		copy(comm[:], "bash")
@@ -94,6 +98,8 @@ func TestFeatureExtraction(t *testing.T) {
 			Comm:      comm,
 		})
 	}
+
+	// 5 openat events accessing /etc/passwd (sensitive)
 	for i := 0; i < 5; i++ {
 		var comm [16]byte
 		var fname [64]byte
@@ -107,42 +113,37 @@ func TestFeatureExtraction(t *testing.T) {
 		})
 	}
 
-	// Feed into extractor via channel
 	ch := make(chan collector.BpfEvent, len(events))
 	for _, e := range events {
 		ch <- e
 	}
-	close(ch)
+	close(ch) // signals end of input; extractor must flush before returning
 
 	stopCh := make(chan struct{})
+	defer close(stopCh)
+
 	ext := extractor.NewExtractor(ch, 100*time.Millisecond)
+	go ext.Run(stopCh)
 
 	var got extractor.FeatureVector
-	done := make(chan struct{})
-	go func() {
-		go ext.Run(stopCh)
-		got = <-ext.FeatureCh
-		close(done)
-	}()
-
 	select {
-	case <-done:
+	case got = <-ext.FeatureCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for feature vector")
 	}
-	close(stopCh)
 
 	if got.ExecCount != 10 {
-		t.Errorf("expected exec_count=10, got %d", got.ExecCount)
+		t.Errorf("ExecCount: want 10, got %d", got.ExecCount)
 	}
 	if got.SensitiveFileHits < 1 {
-		t.Errorf("expected sensitive_file_hits >= 1, got %d", got.SensitiveFileHits)
+		t.Errorf("SensitiveFileHits: want >= 1, got %d", got.SensitiveFileHits)
 	}
 	t.Logf("FeatureVector: exec=%d sensitive=%d files=%d",
 		got.ExecCount, got.SensitiveFileHits, got.UniqueFilesOpened)
 }
 
-// TestSenderHTTP verifies the sender POSTs correct JSON and parses response.
+// TestSenderHTTP verifies that the sender POSTs correct JSON and parses
+// both normal and anomalous responses without error.
 func TestSenderHTTP(t *testing.T) {
 	srv := fakePredictServer(t)
 	defer srv.Close()
@@ -150,17 +151,38 @@ func TestSenderHTTP(t *testing.T) {
 	stopCh := make(chan struct{})
 	featureCh := make(chan extractor.FeatureVector, 2)
 
-	snd := sender.NewSender(srv.URL, -0.1)
+	snd := mustNewSender(t, srv.URL, -0.1)
 	go snd.Run(featureCh, stopCh)
 
-	// Send a normal vector
 	featureCh <- extractor.FeatureVector{ExecCount: 3, NewConnections: 1}
 	time.Sleep(200 * time.Millisecond)
 
-	// Send an anomalous vector
 	featureCh <- extractor.FeatureVector{ExecCount: 50, NewConnections: 30}
 	time.Sleep(200 * time.Millisecond)
 
 	close(stopCh)
 	log.Println("Sender HTTP test passed ✅")
+}
+
+// TestNewSenderValidation checks that invalid URLs are rejected upfront.
+func TestNewSenderValidation(t *testing.T) {
+	cases := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"http://localhost:8000", false},
+		{"https://example.com", false},
+		{"not-a-url", true},
+		{"ftp://bad-scheme.com", true},
+		{"", true},
+	}
+	for _, tc := range cases {
+		_, err := sender.NewSender(tc.url, -0.1)
+		if tc.wantErr && err == nil {
+			t.Errorf("NewSender(%q): expected error, got nil", tc.url)
+		}
+		if !tc.wantErr && err != nil {
+			t.Errorf("NewSender(%q): unexpected error: %v", tc.url, err)
+		}
+	}
 }
