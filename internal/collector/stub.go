@@ -1,9 +1,4 @@
-// ============================================================
-// internal/collector/stub.go
-// Stub event generator — replaces RunStub inline to avoid
-// import cycle and keep ebpf_loader.go clean of "time" import
-// when building for real kernel targets.
-// ============================================================
+// Package collector — stub event generator for testing without a real kernel.
 package collector
 
 import (
@@ -11,10 +6,10 @@ import (
 	"time"
 )
 
-// RunStub emits synthetic BpfEvents so the full pipeline can be
-// tested on any machine that doesn't have eBPF support.
+// RunStubEvents emits synthetic BpfEvents so the full pipeline can be
+// exercised on any machine without eBPF support (CI, macOS, VMs).
 func (c *Collector) RunStubEvents() {
-	log.Println("🧪 Running STUB collector — synthetic events, no real eBPF")
+	log.Println("[stub] starting synthetic event stream")
 
 	syscalls := []SyscallID{SyscallExecve, SyscallOpenat, SyscallConnect, SyscallClone}
 	procs := []string{"bash", "curl", "python3", "sshd", "cat", "wget", "nmap"}
@@ -54,14 +49,14 @@ func (c *Collector) RunStubEvents() {
 			select {
 			case c.EventCh <- evt:
 			default:
-				// pipeline channel full — drop
+				// pipeline full — drop rather than blocking
 			}
 			i++
 		}
 	}
 }
 
-// Stop signals the stub (or real) collector to halt.
+// Stop signals the collector to halt.  Safe to call multiple times.
 func (c *Collector) Stop() {
 	select {
 	case <-c.stopCh: // already closed

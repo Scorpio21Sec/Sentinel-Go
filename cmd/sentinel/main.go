@@ -1,12 +1,13 @@
 // ============================================================
 // cmd/sentinel/main.go
-// SentinelGo — OS-level AI security system
-// Wires: eBPF collector → feature extractor → ML sender
+// Wires the eBPF collector → feature extractor → ML sender pipeline.
 //
 // Usage:
-//   sudo ./sentinel                          # real eBPF mode
-//   sudo ./sentinel --stub                   # stub mode (no kernel needed)
-//   sudo ./sentinel --ebpf-obj=./sentinel.bpf.o
+//
+//	sudo ./sentinel                         # real eBPF mode
+//	sudo ./sentinel --stub                  # no kernel required
+//	sudo ./sentinel --ebpf-obj=./sentinel.bpf.o
+//
 // ============================================================
 package main
 
@@ -24,58 +25,60 @@ import (
 )
 
 func main() {
-	// ── CLI flags ─────────────────────────────────────────────
-	stubMode   := flag.Bool("stub", false, "Use synthetic events (no real eBPF required)")
-	ebpfObj    := flag.String("ebpf-obj", "./ebpf/sentinel.bpf.o", "Path to compiled eBPF object file")
-	apiURL     := flag.String("api", "http://localhost:8000", "Python FastAPI base URL")
-	windowSec  := flag.Int("window", 5, "Feature extraction window in seconds")
-	threshold  := flag.Float64("threshold", -0.1, "Anomaly score threshold (more negative = stricter)")
+	stubMode := flag.Bool("stub", false, "use synthetic events (no real eBPF required)")
+	ebpfObj := flag.String("ebpf-obj", "./ebpf/sentinel.bpf.o", "path to compiled eBPF object file")
+	apiURL := flag.String("api", "http://localhost:8000", "Python FastAPI base URL")
+	windowSec := flag.Int("window", 5, "feature extraction window in seconds")
+	threshold := flag.Float64("threshold", -0.1, "anomaly score threshold (more negative = stricter)")
 	flag.Parse()
+
+	if *windowSec < 1 {
+		log.Fatalf("--window must be >= 1, got %d", *windowSec)
+	}
 
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 	printBanner()
 
-	// ── Shared stop channel ───────────────────────────────────
 	stopCh := make(chan struct{})
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sig
-		log.Println("Shutting down…")
+		log.Println("shutting down…")
 		close(stopCh)
 	}()
 
-	// ── Stage 1: Collector ────────────────────────────────────
 	coll := collector.NewCollector(512)
 
 	if *stubMode {
-		log.Println("⚙️  Mode: STUB (synthetic events)")
+		log.Println("mode: stub (synthetic events)")
 		go coll.RunStubEvents()
 	} else {
-		log.Printf("⚙️  Mode: eBPF — loading %s", *ebpfObj)
+		log.Printf("mode: eBPF — loading %s", *ebpfObj)
 		go func() {
 			if err := coll.Run(*ebpfObj); err != nil {
-				log.Fatalf("eBPF collector error: %v", err)
+				log.Fatalf("eBPF collector: %v", err)
 			}
 		}()
 	}
 
-	// ── Stage 2: Feature Extractor ────────────────────────────
 	window := time.Duration(*windowSec) * time.Second
 	ext := extractor.NewExtractor(coll.EventCh, window)
 	go ext.Run(stopCh)
 
-	// ── Stage 3: ML Sender ────────────────────────────────────
-	snd := sender.NewSender(*apiURL, *threshold)
+	snd, err := sender.NewSender(*apiURL, *threshold)
+	if err != nil {
+		log.Fatalf("invalid --api flag: %v", err)
+	}
 	go snd.Run(ext.FeatureCh, stopCh)
 
-	log.Printf("🔍 Pipeline running — window=%ds  api=%s", *windowSec, *apiURL)
-	log.Println("Press Ctrl+C to stop.")
+	log.Printf("pipeline running — window=%ds  api=%s", *windowSec, *apiURL)
+	log.Println("press Ctrl+C to stop")
 
 	<-stopCh
 	coll.Stop()
-	log.Println("Goodbye.")
+	log.Println("goodbye")
 }
 
 func printBanner() {

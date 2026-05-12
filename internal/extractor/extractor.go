@@ -1,11 +1,5 @@
-// ============================================================
-// internal/extractor/extractor.go
-// TOPIC 5 — Feature Extraction
-//
-// Reads BpfEvents from the collector channel, aggregates them
-// over a configurable time window (default 5 seconds), and
-// emits a FeatureVector for the ML model.
-// ============================================================
+// Package extractor aggregates raw BpfEvents into fixed-time-window
+// FeatureVectors that the ML model can consume.
 package extractor
 
 import (
@@ -17,23 +11,18 @@ import (
 	"sentinelgo/internal/collector"
 )
 
-// FeatureVector is the numerical representation of system behaviour
-// over one time window. This is what the Isolation Forest receives.
+// FeatureVector is the numerical summary of system activity over one time
+// window. Field order must match FeatureVector.ToSlice() and the Python
+// server's FEATURE_NAMES list.
 type FeatureVector struct {
-	// --- Process activity ---
-	ExecCount   int `json:"exec_count"`   // # of execve calls
-	ForkRate    int `json:"fork_rate"`    // # of clone/fork calls
-	UniqueProcs int `json:"unique_procs"` // # of distinct process names
+	ExecCount         int `json:"exec_count"`          // execve calls (new processes)
+	ForkRate          int `json:"fork_rate"`           // clone/fork calls
+	UniqueProcs       int `json:"unique_procs"`        // distinct process names seen
+	UniqueFilesOpened int `json:"unique_files_opened"` // distinct file paths opened
+	SensitiveFileHits int `json:"sensitive_file_hits"` // opens hitting /etc/, /root/, .ssh/, etc.
+	TotalOpenCalls    int `json:"total_open_calls"`    // raw openat count
+	NewConnections    int `json:"new_connections"`     // connect() calls
 
-	// --- File activity ---
-	UniqueFilesOpened   int `json:"unique_files_opened"`   // # of distinct files opened
-	SensitiveFileHits   int `json:"sensitive_file_hits"`   // opens of /etc/, /root/, etc.
-	TotalOpenCalls      int `json:"total_open_calls"`      // raw count of openat calls
-
-	// --- Network activity ---
-	NewConnections int `json:"new_connections"` // # of connect() calls
-
-	// --- Metadata ---
 	WindowStart time.Time `json:"window_start"`
 	WindowEnd   time.Time `json:"window_end"`
 }
@@ -87,22 +76,46 @@ func NewExtractor(input <-chan collector.BpfEvent, window time.Duration) *Extrac
 }
 
 // Run starts the extraction loop. Call in a separate goroutine.
+// It closes FeatureCh when it returns, so downstream consumers
+// can use a range loop and detect shutdown naturally.
 func (ex *Extractor) Run(stopCh <-chan struct{}) {
 	ticker := time.NewTicker(ex.WindowDuration)
 	defer ticker.Stop()
 	defer close(ex.FeatureCh)
 
-	// Per-window accumulators
 	var (
-		execCount         int
-		forkRate          int
-		openCount         int
-		connectCount      int
-		sensitiveHits     int
-		uniqueProcs       = make(map[string]struct{})
-		uniqueFiles       = make(map[string]struct{})
-		windowStart       = time.Now()
+		execCount     int
+		forkRate      int
+		openCount     int
+		connectCount  int
+		sensitiveHits int
+		uniqueProcs   = make(map[string]struct{})
+		uniqueFiles   = make(map[string]struct{})
+		windowStart   = time.Now()
 	)
+
+	flush := func() {
+		fv := FeatureVector{
+			ExecCount:         execCount,
+			ForkRate:          forkRate,
+			UniqueProcs:       len(uniqueProcs),
+			UniqueFilesOpened: len(uniqueFiles),
+			SensitiveFileHits: sensitiveHits,
+			TotalOpenCalls:    openCount,
+			NewConnections:    connectCount,
+			WindowStart:       windowStart,
+			WindowEnd:         time.Now(),
+		}
+		log.Printf("[extractor] window %s → exec=%d fork=%d files=%d sensitive=%d net=%d",
+			fv.WindowEnd.Format("15:04:05"),
+			fv.ExecCount, fv.ForkRate, fv.UniqueFilesOpened,
+			fv.SensitiveFileHits, fv.NewConnections)
+		select {
+		case ex.FeatureCh <- fv:
+		default:
+			log.Println("[extractor] feature channel full — dropping window")
+		}
+	}
 
 	reset := func() {
 		execCount = 0
@@ -122,7 +135,10 @@ func (ex *Extractor) Run(stopCh <-chan struct{}) {
 
 		case evt, ok := <-ex.inputCh:
 			if !ok {
-				return // input channel closed
+				// Input closed — flush whatever we have before returning so
+				// callers don't lose the last partial window.
+				flush()
+				return
 			}
 			proc := evt.ProcessName()
 			file := evt.FilePath()
@@ -146,36 +162,14 @@ func (ex *Extractor) Run(stopCh <-chan struct{}) {
 			}
 
 		case <-ticker.C:
-			// Emit feature vector for the completed window
-			fv := FeatureVector{
-				ExecCount:           execCount,
-				ForkRate:            forkRate,
-				UniqueProcs:         len(uniqueProcs),
-				UniqueFilesOpened:   len(uniqueFiles),
-				SensitiveFileHits:   sensitiveHits,
-				TotalOpenCalls:      openCount,
-				NewConnections:      connectCount,
-				WindowStart:         windowStart,
-				WindowEnd:           time.Now(),
-			}
-
-			log.Printf("[extractor] window %s → exec=%d fork=%d files=%d sensitive=%d net=%d",
-				fv.WindowEnd.Format("15:04:05"),
-				fv.ExecCount, fv.ForkRate, fv.UniqueFilesOpened,
-				fv.SensitiveFileHits, fv.NewConnections)
-
-			select {
-			case ex.FeatureCh <- fv:
-			default:
-				log.Println("[extractor] feature channel full — dropping window")
-			}
-
+			flush()
 			reset()
 		}
 	}
 }
 
-// isSensitive returns true if the file path matches a known sensitive prefix.
+// isSensitive reports whether the path touches a high-value target
+// (credential files, home dirs, kernel interfaces).
 func isSensitive(path string) bool {
 	for _, prefix := range collector.SensitivePrefixes {
 		if strings.HasPrefix(path, prefix) {

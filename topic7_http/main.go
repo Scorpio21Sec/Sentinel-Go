@@ -3,9 +3,13 @@
 // TOPIC 7 MINI-TASK — Go HTTP client calling FastAPI
 //
 // Start the Python server first:
-//   cd ml && python server.py
+//
+//	cd ml && python server.py
+//
 // Then run:
-//   go run topic7_http/main.go
+//
+//	go run topic7_http/main.go
+//
 // ============================================================
 package main
 
@@ -20,13 +24,13 @@ import (
 )
 
 type FeatureVector struct {
-	ExecCount         int     `json:"exec_count"`
-	ForkRate          int     `json:"fork_rate"`
-	UniqueProcs       int     `json:"unique_procs"`
-	UniqueFilesOpened int     `json:"unique_files_opened"`
-	SensitiveFileHits int     `json:"sensitive_file_hits"`
-	TotalOpenCalls    int     `json:"total_open_calls"`
-	NewConnections    int     `json:"new_connections"`
+	ExecCount         int `json:"exec_count"`
+	ForkRate          int `json:"fork_rate"`
+	UniqueProcs       int `json:"unique_procs"`
+	UniqueFilesOpened int `json:"unique_files_opened"`
+	SensitiveFileHits int `json:"sensitive_file_hits"`
+	TotalOpenCalls    int `json:"total_open_calls"`
+	NewConnections    int `json:"new_connections"`
 }
 
 type PredictResponse struct {

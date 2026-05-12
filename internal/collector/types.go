@@ -1,8 +1,5 @@
-// ============================================================
-// internal/collector/types.go
-// Shared event and feature types.
-// The BpfEvent struct MUST mirror the C struct in sentinel.bpf.c
-// ============================================================
+// Package collector defines the BpfEvent type and related helpers.
+// BpfEvent.SyscallID values MUST match the constants in sentinel.bpf.c.
 package collector
 
 // SyscallID maps integer IDs (from eBPF) to human-readable names.
@@ -23,7 +20,7 @@ var SyscallNames = map[SyscallID]string{
 }
 
 // BpfEvent is the raw event received from the eBPF ring buffer.
-// Field layout MUST match struct event in sentinel.bpf.c (byte-for-byte).
+// Field layout MUST match struct event in sentinel.bpf.c exactly.
 type BpfEvent struct {
 	PID         uint32
 	PPID        uint32
@@ -61,7 +58,8 @@ func (e *BpfEvent) SyscallName() string {
 	return "unknown"
 }
 
-// Sensitive file prefixes — hits on these are flagged.
+// SensitivePaths is the set of path prefixes that trigger a sensitive-file hit.
+// Hits on these paths are a common indicator of credential harvesting.
 var SensitivePrefixes = []string{
 	"/etc/passwd",
 	"/etc/shadow",
