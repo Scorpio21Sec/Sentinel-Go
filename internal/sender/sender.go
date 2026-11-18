@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"sentinelgo/internal/extractor"
@@ -39,6 +40,7 @@ type Sender struct {
 	apiURL    string
 	threshold float64 // score below this triggers a local alert (backup to server flag)
 	client    *http.Client
+	jsonOutput bool
 }
 
 // NewSender creates a Sender targeting the given FastAPI base URL.
@@ -53,6 +55,11 @@ func NewSender(apiURL string, threshold float64) (*Sender, error) {
 		threshold: threshold,
 		client:    &http.Client{Timeout: 3 * time.Second},
 	}, nil
+}
+
+// SetJSONOutput enables newline-delimited JSON prediction records on stdout.
+func (s *Sender) SetJSONOutput(enabled bool) {
+	s.jsonOutput = enabled
 }
 
 // Run reads from featureCh and sends each vector to the ML server.
@@ -105,6 +112,29 @@ func (s *Sender) postFeatureVector(fv extractor.FeatureVector) error {
 	var pr PredictResponse
 	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		return fmt.Errorf("decode predict response: %w", err)
+	}
+
+	if s.jsonOutput {
+		record := struct {
+			Timestamp    time.Time               `json:"timestamp"`
+			WindowStart  time.Time               `json:"window_start"`
+			WindowEnd    time.Time               `json:"window_end"`
+			AnomalyScore float64                 `json:"anomaly_score"`
+			IsAnomaly    bool                    `json:"is_anomaly"`
+			Confidence   float64                 `json:"confidence"`
+			Model        string                  `json:"model"`
+			Features     extractor.FeatureVector `json:"features"`
+		}{
+			Timestamp:    time.Now().UTC(),
+			WindowStart:  fv.WindowStart,
+			WindowEnd:    fv.WindowEnd,
+			AnomalyScore: pr.AnomalyScore,
+			IsAnomaly:    pr.IsAnomaly,
+			Confidence:   pr.Confidence,
+			Model:        pr.Model,
+			Features:     fv,
+		}
+		return json.NewEncoder(os.Stdout).Encode(record)
 	}
 
 	if pr.IsAnomaly {

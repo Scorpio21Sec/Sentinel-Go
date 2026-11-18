@@ -96,6 +96,14 @@ go build ./cmd/sentinel
 ./sentinel --stub --api=http://localhost:8000
 ```
 
+Add `--json` to emit one JSON object per prediction window on stdout. Each
+record includes the model result, window timestamps, and extracted features,
+so it can be piped into a log processor:
+
+```bash
+./sentinel --stub --json --api=http://localhost:8000
+```
+
 ### 3. Real eBPF mode (Linux kernel 5.8+, requires root)
 
 ```bash

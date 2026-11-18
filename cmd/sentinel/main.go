@@ -30,6 +30,7 @@ func main() {
 	apiURL := flag.String("api", "http://localhost:8000", "Python FastAPI base URL")
 	windowSec := flag.Int("window", 5, "feature extraction window in seconds")
 	threshold := flag.Float64("threshold", -0.1, "anomaly score threshold (more negative = stricter)")
+	jsonOutput := flag.Bool("json", false, "emit prediction results as JSON Lines")
 	flag.Parse()
 
 	if *windowSec < 1 {
@@ -71,6 +72,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid --api flag: %v", err)
 	}
+	snd.SetJSONOutput(*jsonOutput)
 	go snd.Run(ext.FeatureCh, stopCh)
 
 	log.Printf("pipeline running — window=%ds  api=%s", *windowSec, *apiURL)
