@@ -1,0 +1,80 @@
+name: Daily Go health report
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+      timezone: "Asia/Kolkata"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-go-health-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go tests
+        id: tests
+        continue-on-error: true
+        run: go test ./...
+
+      - name: Run go vet
+        id: vet
+        continue-on-error: true
+        run: go vet ./...
+
+      - name: Write one report for today
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          VET_OUTCOME: ${{ steps.vet.outcome }}
+        run: |
+          report="reports/daily-health/$(date -u +'%Y-%m-%d').md"
+          if [ -e "$report" ]; then
+            echo "A report for today already exists; leaving it unchanged."
+            exit 0
+          fi
+          mkdir -p reports/daily-health
+          {
+            echo "# Daily Go health report"
+            echo
+            echo "- Date (UTC): $(date -u +'%Y-%m-%d')"
+            echo "- Commit checked: $GITHUB_SHA"
+            echo "- Go tests: $TEST_OUTCOME"
+            echo "- go vet: $VET_OUTCOME"
+          } > "$report"
+
+      - name: Commit today's report
+        if: always()
+        run: |
+          report="reports/daily-health/$(date -u +'%Y-%m-%d').md"
+          if [ ! -f "$report" ]; then
+            echo "No report was created; skipping commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$report"
+          if git diff --cached --quiet; then
+            echo "No report changes to commit."
+            exit 0
+          fi
+          git commit -m "chore(report): daily Go health $(date -u +'%Y-%m-%d')"
+          git push
+
+      - name: Fail the run if a check failed
+        if: always() && (steps.tests.outcome != 'success' || steps.vet.outcome != 'success')
+        run: exit 1
